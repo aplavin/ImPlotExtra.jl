@@ -128,6 +128,45 @@ function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, refresh) wh
     nothing
 end
 
+"""
+    image!(label, data; kwargs...)
+    image!(label, xs::Interval, ys::Interval, data; kwargs...)
+
+Draw a matrix/image into the current `ImPlot` plot (call between `ImPlot.BeginPlot`/`EndPlot`),
+as a performant replacement for `ImPlot.PlotHeatmap`: `data` is uploaded once as a GPU texture and
+drawn as a single quad, so pan/zoom is free and the (CPU) colormap is recomputed only when inputs change.
+
+`data::AbstractMatrix{<:Number}` is colormapped; `data::AbstractMatrix{<:Colorant}` is shown as-is.
+Indexing follows Makie's `image`: the first index → x (rightward), the second → y (upward), so
+`data[1,1]` is at the bottom-left. By default `data[i,j]` is centered at plot coordinate `(i,j)`
+(extent `1..size(data,1)` × `1..size(data,2)`); pass `xs`/`ys` as `IntervalSets` intervals giving the
+first/last pixel *centers* (uniformly spaced, so the drawn rectangle extends ±½ pixel beyond).
+
+# Keyword arguments (scalar path)
+- `colormap = :viridis`: a `ColorSchemes` `Symbol`/name, a `ColorScheme`, or a `Vector{<:Colorant}`.
+- `colorrange = nothing`: `(lo, hi)` in data units; `nothing` ⇒ finite extrema. `lo == hi` ⇒ midpoint color.
+- `colorscale = identity`: callable applied to data and to `colorrange` (e.g. `log10`, `sqrt`); must be
+  finite on `colorrange` (fails loud otherwise).
+- `interpolate = false`: `false` ⇒ nearest (crisp pixels), `true` ⇒ bilinear.
+- `nan_color = RGBA(0,0,0,0)`: color for `NaN`/`Inf` (incl. non-finite after `colorscale`).
+- `refresh = false`: force re-upload even if the array object is unchanged (see preconditions).
+
+The Colorant path takes only `interpolate` and `refresh`.
+
+# Preconditions / contract
+- **Backend:** uses CImGui's GLFW/OpenGL texture helpers; the host must `import GLFW` and
+  `CImGui.set_backend(:GlfwOpenGL3)` before drawing (ImPlotExtra does not depend on GLFW). Otherwise
+  it fails loud via CImGui's backend check.
+- **Stable identities:** the texture is re-uploaded only when an input changes. Pass `colormap`/
+  `colorscale` as stable objects (a `Symbol`, a named function, or a kept `ColorScheme`); a freshly
+  built `ColorScheme` or an inline anonymous `colorscale` created every frame re-uploads every frame.
+- **In-place mutation:** re-upload triggers on `data` *identity* (`===`). If you mutate the same array
+  buffer in place, pass `refresh = true`.
+- **Single-threaded:** call from the ImGui render thread (the cache is plain global state).
+
+The cache evicts a call-site's texture after it has been idle for `cache_grace_seconds[]` (default 30 s;
+set to `Inf` to disable).
+"""
 function image!(label::AbstractString, x::AbstractInterval, y::AbstractInterval, data::AbstractMatrix{<:Number};
                 colormap=:viridis, colorrange=nothing, colorscale=identity, interpolate::Bool=false,
                 nan_color=RGBA{N0f8}(0,0,0,0), refresh::Bool=false)

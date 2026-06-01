@@ -47,3 +47,8 @@ function _centers_to_bounds(x::AbstractInterval, n::Integer)
     Δ = n > 1 ? (b - a) / (n - 1) : (b > a ? (b - a) : 1.0)
     (a - Δ/2, b + Δ/2)
 end
+
+_needs_update(::Nothing, _, _) = true
+# tuple === is element-wise egal: identity for the `data` array, value for the isbits rest
+# (colorrange/nan_color/interpolate/extent intervals) and singleton funcs/Symbols. Verified.
+_needs_update(old::Tuple, new::Tuple, refresh::Bool) = refresh || old !== new

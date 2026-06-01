@@ -83,3 +83,17 @@ end
     @test (hi - lo) ≈ 4 * ((2-1)/3)           # total width = N·Δ
     @test g(1..4, 4) == (0.5, 4.5)            # default-style: centers 1:4 ⇒ data[i] at i, edges 0.5..4.5
 end
+
+@testitem "_needs_update" begin
+    using IntervalSets: (..)
+    using ColorTypes: RGBA, N0f8
+    nu = ImPlotExtra._needs_update
+    a = rand(2,2); b = copy(a)
+    base = (a, (0.0,1.0), :viridis, identity, RGBA{N0f8}(0,0,0,0), false, (1..2, 1..2))
+    @test nu(nothing, base, false)                         # no prior entry
+    @test !nu(base, base, false)                            # identical ⇒ no update
+    @test nu(base, base, true)                              # refresh forces update
+    @test nu(base, (b, base[2:end]...), false)              # different array object (===)
+    @test nu(base, (a, (0.0,2.0), base[3:end]...), false)   # colorrange changed
+    @test !nu(base, (a, base[2:end]...), false)             # same object, same opts
+end

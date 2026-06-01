@@ -83,3 +83,57 @@ function _draw(p::_ImageTexture, label::AbstractString, bmin, bmax)
 end
 
 Base.close(p::_ImageTexture) = (p.tex !== nothing && (ig.destroy_image_texture(p.tex); p.tex = nothing); nothing)
+
+struct _Entry
+    tex::_ImageTexture
+    inputs::Tuple
+    last_used::Float64
+end
+
+const _CACHE = Dict{Tuple{Ptr{ig.lib.ImGuiContext},ig.lib.ImGuiID},_Entry}()
+const cache_grace_seconds = Ref(30.0)                       # set to Inf to disable eviction
+const _last_sweep_frame = Dict{Ptr{ig.lib.ImGuiContext},Int}()
+
+function _sweep!(ctx, now)
+    isfinite(cache_grace_seconds[]) || return
+    for k in collect(keys(_CACHE))                          # collect ⇒ safe to delete! during loop
+        e = _CACHE[k]
+        if k[1] == ctx && (now - e.last_used) > cache_grace_seconds[]
+            close(e.tex); delete!(_CACHE, k)
+        end
+    end
+end
+
+# Shared orchestration; `fill!` runs ONLY on update (so resolve_scheme/_colorrange/recolor are skipped when cached).
+function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, refresh) where {F}
+    ctx = ig.GetCurrentContext()
+    now = ig.GetTime()
+    fc = Int(ig.GetFrameCount())
+    if get(_last_sweep_frame, ctx, -1) != fc
+        _last_sweep_frame[ctx] = fc
+        _sweep!(ctx, now)
+    end
+    key = (ctx, ig.GetID(label))
+    old = get(_CACHE, key, nothing)
+    p = old === nothing ? _ImageTexture() : old.tex
+    if _needs_update(old === nothing ? nothing : old.inputs, inputs, refresh)
+        _ensure_texture!(p, n1, n2, interpolate)
+        buf = Matrix{RGBA{N0f8}}(undef, n1, n2)
+        fill!(buf)
+        _upload!(p, buf)
+    end
+    _CACHE[key] = _Entry(p, inputs, now)                    # re-stamp last_used every frame ⇒ kept alive
+    _draw(p, label, _centers_to_bounds(x, n1), _centers_to_bounds(y, n2))
+    nothing
+end
+
+function image!(label::AbstractString, x::AbstractInterval, y::AbstractInterval, data::AbstractMatrix{<:Number};
+                colormap=:viridis, colorrange=nothing, colorscale=identity, interpolate::Bool=false,
+                nan_color=RGBA{N0f8}(0,0,0,0), refresh::Bool=false)
+    inputs = (data, colorrange, colormap, colorscale, nan_color, interpolate, (x, y))
+    _image!(label, x, y, inputs, size(data,1), size(data,2), interpolate, refresh) do buf
+        _scalar_rgba!(buf, data, resolve_scheme(colormap);
+                      colorrange=_colorrange(data, colorrange), colorscale, nan_color)
+    end
+end
+image!(label, data::AbstractMatrix{<:Number}; kw...) = image!(label, 1..size(data,1), 1..size(data,2), data; kw...)

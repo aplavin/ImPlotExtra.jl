@@ -52,3 +52,34 @@ _needs_update(::Nothing, _, _) = true
 # tuple === is element-wise egal: identity for the `data` array, value for the isbits rest
 # (colorrange/nan_color/interpolate/extent intervals) and singleton funcs/Symbols. Verified.
 _needs_update(old::Tuple, new::Tuple, refresh::Bool) = refresh || old !== new
+
+mutable struct _ImageTexture
+    tex::Union{Nothing,ig.lib.ImTextureRef}
+    w::Int
+    h::Int
+    interpolate::Bool
+end
+_ImageTexture() = _ImageTexture(nothing, 0, 0, false)
+
+function _ensure_texture!(p::_ImageTexture, w::Int, h::Int, interpolate::Bool)
+    if p.tex === nothing || p.w != w || p.h != h || p.interpolate != interpolate
+        p.tex === nothing || ig.destroy_image_texture(p.tex)   # destroy BEFORE reassigning ⇒ no leak
+        p.tex = ig.create_image_texture(w, h)
+        p.w, p.h, p.interpolate = w, h, interpolate
+        filt = interpolate ? GL.GL_LINEAR : GL.GL_NEAREST       # backend presets LINEAR; override
+        GL.glBindTexture(GL.GL_TEXTURE_2D, GL.GLuint(p.tex._TexID))
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, filt)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, filt)
+    end
+    p
+end
+
+_upload!(p::_ImageTexture, buf::AbstractMatrix{RGBA{N0f8}}) = ig.update_image_texture(p.tex, buf, p.w, p.h)
+
+function _draw(p::_ImageTexture, label::AbstractString, bmin, bmax)
+    ImPlot.PlotImage(label, p.tex,
+        ImPlot.ImPlotPoint(bmin[1], bmin[2]), ImPlot.ImPlotPoint(bmax[1], bmax[2]),
+        ig.ImVec2(0, 1), ig.ImVec2(1, 0))     # uv0,uv1 ⇒ full-Makie orientation (data[1,1] bottom-left)
+end
+
+Base.close(p::_ImageTexture) = (p.tex !== nothing && (ig.destroy_image_texture(p.tex); p.tex = nothing); nothing)

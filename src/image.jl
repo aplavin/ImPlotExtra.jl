@@ -123,7 +123,8 @@ function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, refresh) wh
         _upload!(p, buf)
     end
     _CACHE[key] = _Entry(p, inputs, now)                    # re-stamp last_used every frame ⇒ kept alive
-    _draw(p, label, _centers_to_bounds(x, n1), _centers_to_bounds(y, n2))
+    xb = _centers_to_bounds(x, n1); yb = _centers_to_bounds(y, n2)   # (xmin,xmax),(ymin,ymax)
+    _draw(p, label, (xb[1], yb[1]), (xb[2], yb[2]))         # corner points (xmin,ymin),(xmax,ymax)
     nothing
 end
 

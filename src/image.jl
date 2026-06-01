@@ -41,3 +41,9 @@ function _colorant_rgba!(buf::AbstractMatrix{RGBA{N0f8}}, data)
     size(buf) == size(data) || error("buffer size $(size(buf)) ≠ $(size(data))")
     map!(c -> convert(RGBA{N0f8}, c), buf, data)
 end
+
+function _centers_to_bounds(x::AbstractInterval, n::Integer)
+    a, b = float(leftendpoint(x)), float(rightendpoint(x))
+    Δ = n > 1 ? (b - a) / (n - 1) : (b > a ? (b - a) : 1.0)
+    (a - Δ/2, b + Δ/2)
+end

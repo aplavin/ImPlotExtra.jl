@@ -72,3 +72,14 @@ end
     bg = Matrix{RGBA{N0f8}}(undef,1,1); f(bg, reshape([Gray(0.5)],1,1))
     @test alpha(bg[1,1]) == 1                         # Gray/RGB ⇒ opaque
 end
+
+@testitem "_centers_to_bounds" begin
+    using IntervalSets: (..)
+    g = ImPlotExtra._centers_to_bounds
+    @test g(1..2, 4) == (1 - 1/6, 2 + 1/6)    # Δ=(2-1)/3=1/3 ; edges first-Δ/2 .. last+Δ/2
+    @test g(1..2, 2) == (0.5, 2.5)            # Δ=1 ; n=2
+    @test g(0..0, 1) == (-0.5, 0.5)           # single pixel, degenerate interval ⇒ unit width
+    lo, hi = g(1..2, 4)
+    @test (hi - lo) ≈ 4 * ((2-1)/3)           # total width = N·Δ
+    @test g(1..4, 4) == (0.5, 4.5)            # default-style: centers 1:4 ⇒ data[i] at i, edges 0.5..4.5
+end

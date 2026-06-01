@@ -35,3 +35,9 @@ function _scalar_rgba!(buf::AbstractMatrix{RGBA{N0f8}}, data, scheme; colorrange
         isfinite(t) ? convert(RGBA{N0f8}, get(scheme, clamp(t, 0.0, 1.0))) : nanc
     end
 end
+
+function _colorant_rgba!(buf::AbstractMatrix{RGBA{N0f8}}, data)
+    Base.require_one_based_indexing(data)
+    size(buf) == size(data) || error("buffer size $(size(buf)) ≠ $(size(data))")
+    map!(c -> convert(RGBA{N0f8}, c), buf, data)
+end

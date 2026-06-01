@@ -60,3 +60,15 @@ end
     @test_throws Exception f(b4, d4, sc; colorrange=(0.0,10.0), colorscale=log10, nan_color=nanc)   # log10(0)=-Inf
     @test_throws Exception f(b4, d4, sc; colorrange=(10.0,1.0), colorscale=identity, nan_color=nanc) # inverted
 end
+
+@testitem "_colorant_rgba!" begin
+    using ColorTypes: RGB, RGBA, Gray, N0f8, alpha
+    f = ImPlotExtra._colorant_rgba!
+    data = [RGB(1.0,0.0,0.0) RGB(0.0,1.0,0.0)]      # 1×2 ⇒ W=1,H=2
+    buf = Matrix{RGBA{N0f8}}(undef, 1, 2)
+    f(buf, data)
+    @test buf[1,1] == RGBA{N0f8}(1,0,0,1)
+    @test buf[1,2] == RGBA{N0f8}(0,1,0,1)
+    bg = Matrix{RGBA{N0f8}}(undef,1,1); f(bg, reshape([Gray(0.5)],1,1))
+    @test alpha(bg[1,1]) == 1                         # Gray/RGB ⇒ opaque
+end

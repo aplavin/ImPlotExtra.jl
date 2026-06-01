@@ -137,3 +137,12 @@ function image!(label::AbstractString, x::AbstractInterval, y::AbstractInterval,
     end
 end
 image!(label, data::AbstractMatrix{<:Number}; kw...) = image!(label, 1..size(data,1), 1..size(data,2), data; kw...)
+
+function image!(label::AbstractString, x::AbstractInterval, y::AbstractInterval, data::AbstractMatrix{<:Colorant};
+                interpolate::Bool=false, refresh::Bool=false)
+    inputs = (data, nothing, nothing, identity, nothing, interpolate, (x, y))
+    _image!(label, x, y, inputs, size(data,1), size(data,2), interpolate, refresh) do buf
+        _colorant_rgba!(buf, data)
+    end
+end
+image!(label, data::AbstractMatrix{<:Colorant}; kw...) = image!(label, 1..size(data,1), 1..size(data,2), data; kw...)

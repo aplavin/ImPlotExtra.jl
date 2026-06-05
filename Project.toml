@@ -13,11 +13,11 @@ IntervalSets = "8197267c-284f-5f27-9208-e0e47529a953"
 ModernGL = "66fc600b-dfda-50eb-8b99-91cfa97b1301"
 
 [compat]
-CImGui = "7"
+CImGui = "8"
 ColorSchemes = "3"
 ColorTypes = "0.12"
 FixedPointNumbers = "0.8"
-ImPlot = "0.7"
+ImPlot = "0.8"
 IntervalSets = "0.7"
 ModernGL = "1"
 julia = "1.10"

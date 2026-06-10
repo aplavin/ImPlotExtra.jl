@@ -3,7 +3,6 @@ module ImPlotExtra
 import CImGui
 const ig = CImGui
 import ImPlot
-import ModernGL as GL
 import ColorSchemes
 using ColorSchemes: ColorScheme
 using ColorTypes: Colorant, RGBA

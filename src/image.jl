@@ -57,29 +57,30 @@ mutable struct _ImageTexture
     tex::Union{Nothing,ig.lib.ImTextureRef}
     w::Int
     h::Int
-    interpolate::Bool
 end
-_ImageTexture() = _ImageTexture(nothing, 0, 0, false)
+_ImageTexture() = _ImageTexture(nothing, 0, 0)
 
-function _ensure_texture!(p::_ImageTexture, w::Int, h::Int, interpolate::Bool)
-    if p.tex === nothing || p.w != w || p.h != h || p.interpolate != interpolate
+function _ensure_texture!(p::_ImageTexture, w::Int, h::Int)
+    if p.tex === nothing || p.w != w || p.h != h
         p.tex === nothing || ig.destroy_image_texture(p.tex)   # destroy BEFORE reassigning ⇒ no leak
         p.tex = ig.create_image_texture(w, h)
-        p.w, p.h, p.interpolate = w, h, interpolate
-        filt = interpolate ? GL.GL_LINEAR : GL.GL_NEAREST       # backend presets LINEAR; override
-        GL.glBindTexture(GL.GL_TEXTURE_2D, GL.GLuint(p.tex._TexID))
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, filt)
-        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, filt)
+        p.w, p.h = w, h
     end
     p
 end
 
 _upload!(p::_ImageTexture, buf::AbstractMatrix{RGBA{N0f8}}) = ig.update_image_texture(p.tex, buf, p.w, p.h)
 
-function _draw(p::_ImageTexture, label::AbstractString, bmin, bmax)
+# ImGui 1.92's GL backend binds a LINEAR sampler that overrides any per-texture filter, so nearest-
+# neighbor must be requested per draw via the backend's SetSamplerNearest callback (restored to Linear
+# afterwards). `interpolate=true` just keeps the default Linear sampler.
+function _draw(p::_ImageTexture, label::AbstractString, bmin, bmax, interpolate::Bool)
+    dl = ImPlot.GetPlotDrawList()
+    interpolate || ig.AddCallback(dl, unsafe_load(ig.GetPlatformIO().DrawCallback_SetSamplerNearest), C_NULL, 0)
     ImPlot.PlotImage(label, p.tex,
         ImPlot.ImPlotPoint(bmin[1], bmin[2]), ImPlot.ImPlotPoint(bmax[1], bmax[2]),
         ig.ImVec2(0, 1), ig.ImVec2(1, 0))     # uv0,uv1 ⇒ full-Makie orientation (data[1,1] bottom-left)
+    interpolate || ig.AddCallback(dl, unsafe_load(ig.GetPlatformIO().DrawCallback_SetSamplerLinear), C_NULL, 0)
 end
 
 Base.close(p::_ImageTexture) = (p.tex !== nothing && (ig.destroy_image_texture(p.tex); p.tex = nothing); nothing)
@@ -117,14 +118,14 @@ function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, refresh) wh
     old = get(_CACHE, key, nothing)
     p = old === nothing ? _ImageTexture() : old.tex
     if _needs_update(old === nothing ? nothing : old.inputs, inputs, refresh)
-        _ensure_texture!(p, n1, n2, interpolate)
+        _ensure_texture!(p, n1, n2)
         buf = Matrix{RGBA{N0f8}}(undef, n1, n2)
         fill!(buf)
         _upload!(p, buf)
     end
     _CACHE[key] = _Entry(p, inputs, now)                    # re-stamp last_used every frame ⇒ kept alive
     xb = _centers_to_bounds(x, n1); yb = _centers_to_bounds(y, n2)   # (xmin,xmax),(ymin,ymax)
-    _draw(p, label, (xb[1], yb[1]), (xb[2], yb[2]))         # corner points (xmin,ymin),(xmax,ymax)
+    _draw(p, label, (xb[1], yb[1]), (xb[2], yb[2]), interpolate)   # corner points (xmin,ymin),(xmax,ymax)
     nothing
 end
 

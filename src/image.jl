@@ -74,12 +74,14 @@ _upload!(p::_ImageTexture, buf::AbstractMatrix{RGBA{N0f8}}) = ig.update_image_te
 # ImGui 1.92's GL backend binds a LINEAR sampler that overrides any per-texture filter, so nearest-
 # neighbor must be requested per draw via the backend's SetSamplerNearest callback (restored to Linear
 # afterwards). `interpolate=true` just keeps the default Linear sampler.
-function _draw(p::_ImageTexture, label::AbstractString, bmin, bmax, interpolate::Bool)
+function _draw(p::_ImageTexture, label::AbstractString, bmin, bmax, interpolate::Bool, flags)
     dl = ImPlot.GetPlotDrawList()
     interpolate || ig.AddCallback(dl, unsafe_load(ig.GetPlatformIO().DrawCallback_SetSamplerNearest), C_NULL, 0)
     ImPlot.PlotImage(label, p.tex,
         ImPlot.ImPlotPoint(bmin[1], bmin[2]), ImPlot.ImPlotPoint(bmax[1], bmax[2]),
-        ig.ImVec2(0, 1), ig.ImVec2(1, 0))     # uv0,uv1 ⇒ full-Makie orientation (data[1,1] bottom-left)
+        ig.ImVec2(0, 1), ig.ImVec2(1, 0),     # uv0,uv1 ⇒ full-Makie orientation (data[1,1] bottom-left)
+        ig.ImVec4(1, 1, 1, 1),                # tint
+        ImPlot.ImPlotSpec(; Flags = flags))
     interpolate || ig.AddCallback(dl, unsafe_load(ig.GetPlatformIO().DrawCallback_SetSamplerLinear), C_NULL, 0)
 end
 
@@ -106,7 +108,7 @@ function _sweep!(ctx, now)
 end
 
 # Shared orchestration; `fill!` runs ONLY on update (so resolve_scheme/_colorrange/recolor are skipped when cached).
-function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, refresh) where {F}
+function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, flags, refresh) where {F}
     ctx = ig.GetCurrentContext()
     now = ig.GetTime()
     fc = Int(ig.GetFrameCount())
@@ -125,7 +127,7 @@ function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, refresh) wh
     end
     _CACHE[key] = _Entry(p, inputs, now)                    # re-stamp last_used every frame ⇒ kept alive
     xb = _centers_to_bounds(x, n1); yb = _centers_to_bounds(y, n2)   # (xmin,xmax),(ymin,ymax)
-    _draw(p, label, (xb[1], yb[1]), (xb[2], yb[2]), interpolate)   # corner points (xmin,ymin),(xmax,ymax)
+    _draw(p, label, (xb[1], yb[1]), (xb[2], yb[2]), interpolate, flags)   # corner points (xmin,ymin),(xmax,ymax)
     nothing
 end
 
@@ -149,10 +151,11 @@ first/last pixel *centers* (uniformly spaced, so the drawn rectangle extends ±�
 - `colorscale = identity`: callable applied to data and to `colorrange` (e.g. `log10`, `sqrt`); must be
   finite on `colorrange` (fails loud otherwise).
 - `interpolate = false`: `false` ⇒ nearest (crisp pixels), `true` ⇒ bilinear.
+- `flags = ImPlotItemFlags_None`: `ImPlotItemFlags` bitmask (e.g. `ImPlotItemFlags_NoFit` ⇒ excluded from auto-fit).
 - `nan_color = RGBA(0,0,0,0)`: color for `NaN`/`Inf` (incl. non-finite after `colorscale`).
 - `refresh = false`: force re-upload even if the array object is unchanged (see preconditions).
 
-The Colorant path takes only `interpolate` and `refresh`.
+The Colorant path takes only `interpolate`, `flags` and `refresh`.
 
 # Preconditions / contract
 - **Backend:** uses CImGui's GLFW/OpenGL texture helpers; the host must `import GLFW` and
@@ -170,9 +173,9 @@ set to `Inf` to disable).
 """
 function image!(label::AbstractString, x::AbstractInterval, y::AbstractInterval, data::AbstractMatrix{<:Number};
                 colormap=:viridis, colorrange=nothing, colorscale=identity, interpolate::Bool=false,
-                nan_color=RGBA{N0f8}(0,0,0,0), refresh::Bool=false)
+                flags=ImPlot.ImPlotItemFlags_None, nan_color=RGBA{N0f8}(0,0,0,0), refresh::Bool=false)
     inputs = (data, colorrange, colormap, colorscale, nan_color, interpolate, (x, y))
-    _image!(label, x, y, inputs, size(data,1), size(data,2), interpolate, refresh) do buf
+    _image!(label, x, y, inputs, size(data,1), size(data,2), interpolate, flags, refresh) do buf
         _scalar_rgba!(buf, data, resolve_scheme(colormap);
                       colorrange=_colorrange(data, colorrange), colorscale, nan_color)
     end
@@ -180,9 +183,9 @@ end
 image!(label, data::AbstractMatrix{<:Number}; kw...) = image!(label, 1..size(data,1), 1..size(data,2), data; kw...)
 
 function image!(label::AbstractString, x::AbstractInterval, y::AbstractInterval, data::AbstractMatrix{<:Colorant};
-                interpolate::Bool=false, refresh::Bool=false)
+                interpolate::Bool=false, flags=ImPlot.ImPlotItemFlags_None, refresh::Bool=false)
     inputs = (data, nothing, nothing, identity, nothing, interpolate, (x, y))
-    _image!(label, x, y, inputs, size(data,1), size(data,2), interpolate, refresh) do buf
+    _image!(label, x, y, inputs, size(data,1), size(data,2), interpolate, flags, refresh) do buf
         _colorant_rgba!(buf, data)
     end
 end

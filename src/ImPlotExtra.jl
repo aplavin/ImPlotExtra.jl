@@ -14,4 +14,6 @@ export image!
 
 include("image.jl")
 
+__init__() = ig.atrenderexit(_release_textures!)   # free cached textures on render-loop exit
+
 end

@@ -107,6 +107,18 @@ function _sweep!(ctx, now)
     end
 end
 
+# render-exit handler: free this context's textures (GL still alive) + drop its entries, so a reused
+# context pointer can't hit a stale entry and draw a dead/reassigned texture id (font atlas)
+function _release_textures!()
+    ctx = ig.GetCurrentContext()
+    filter!(_CACHE) do (k, e)
+        k[1] != ctx && return true
+        close(e.tex); false
+    end
+    delete!(_last_sweep_frame, ctx)
+    nothing
+end
+
 # Shared orchestration; `fill!` runs ONLY on update (so resolve_scheme/_colorrange/recolor are skipped when cached).
 function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, flags, refresh) where {F}
     ctx = ig.GetCurrentContext()

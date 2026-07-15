@@ -61,6 +61,46 @@ end
     @test_throws Exception f(b4, d4, sc; colorrange=(10.0,1.0), colorscale=identity, nan_color=nanc) # inverted
 end
 
+@testitem "_scalar_rgba! LUT fast path ≈ per-pixel reference" begin
+    using ColorSchemes: colorschemes, get
+    using ColorTypes: RGBA, N0f8, red, green, blue, alpha
+    nanc = RGBA{N0f8}(0,0,0,0)
+    byte(x) = Int(reinterpret(UInt8, x))
+    chdiff(x, y) = maximum(abs, (byte(red(x))-byte(red(y)), byte(green(x))-byte(green(y)),
+                                 byte(blue(x))-byte(blue(y)), byte(alpha(x))-byte(alpha(y))))
+    # independent per-pixel reference: value→colour directly, no table
+    function ref(data, sc, lo, hi, cs)
+        slo, shi = cs(lo), cs(hi)
+        map(data) do v
+            isfinite(v) || return nanc
+            t = (cs(clamp(v, lo, hi)) - slo) / (shi - slo)
+            isfinite(t) ? convert(RGBA{N0f8}, get(sc, clamp(t, 0.0, 1.0))) : nanc
+        end
+    end
+
+    sc = colorschemes[:viridis]; scb = colorschemes[:balance]
+    cases = ((identity,0.0,1.0,sc), (asinh,1e-4,5.0,sc), (log10,1e-3,10.0,sc), (sqrt,0.0,4.0,sc),
+             (identity,-1.0,1.0,scb), (asinh,-0.5,0.5,scb))
+
+    # Float32: signed, log-spanning data incl. finite out-of-range (±1e8), NaN, Inf
+    d = Float32.(sign.(randn(200,200)) .* 10 .^ (10 .* rand(200,200) .- 5))
+    d[1]=1f8; d[2]=-1f8; d[3]=NaN32; d[4]=Inf32
+    buf = Matrix{RGBA{N0f8}}(undef, size(d))
+    for (cs, lo, hi, scc) in cases
+        ImPlotExtra._scalar_rgba!(buf, d, scc; colorrange=(lo,hi), colorscale=cs, nan_color=nanc)
+        @test maximum(chdiff.(buf, ref(d, scc, lo, hi, cs))) ≤ 2    # 16-bit quantisation ⇒ ≤1 colormap step
+        @test buf[3] == nanc && buf[4] == nanc                       # NaN/Inf → nan_color
+    end
+    @test (@inferred ImPlotExtra._scalar_rgba!(buf, d, sc; colorrange=(1e-4,5.0), colorscale=asinh, nan_color=nanc)) === buf
+
+    # Float16: the 16-bit table enumerates every representable value ⇒ exact
+    d16 = Float16.(10 .^ (3 .* rand(200,200) .- 2)); b16 = Matrix{RGBA{N0f8}}(undef, size(d16))
+    for (cs, lo, hi) in ((asinh,1e-3,5.0), (log10,1e-2,10.0), (identity,0.0,1.0))
+        ImPlotExtra._scalar_rgba!(b16, d16, sc; colorrange=(lo,hi), colorscale=cs, nan_color=nanc)
+        @test maximum(chdiff.(b16, ref(d16, sc, lo, hi, cs))) == 0
+    end
+end
+
 @testitem "_colorant_rgba!" begin
     using ColorTypes: RGB, RGBA, Gray, N0f8, alpha
     f = ImPlotExtra._colorant_rgba!
@@ -96,4 +136,51 @@ end
     @test nu(base, (b, base[2:end]...), false)              # different array object (===)
     @test nu(base, (a, (0.0,2.0), base[3:end]...), false)   # colorrange changed
     @test !nu(base, (a, base[2:end]...), false)             # same object, same opts
+end
+
+@testitem "SymLog + BaseMulTicks + scale_ticks" begin
+    using ImPlotExtra: SymLog, BaseMulTicks, tickvalues, scale_ticks
+
+    # SymLog: asinh-based, odd through 0, value-stable under ===
+    s = SymLog(1e-4)
+    @test s(0.0) == 0.0
+    @test s(3e-4) ≈ asinh(3.0)
+    @test s(-2e-4) ≈ -asinh(2.0)                 # odd
+    @test SymLog(1e-4) === SymLog(1e-4)          # isbits egal ⇒ no per-frame re-upload
+
+    # BaseMulTicks: mul·base^pow over a same-sign range
+    @test tickvalues(BaseMulTicks([1]), 1e-3, 1e-1) ≈ [1e-3, 1e-2, 1e-1]
+    @test isempty(tickvalues(BaseMulTicks([1]), 5.0, 1.0))                  # vmin ≥ vmax ⇒ empty
+    @test sort(tickvalues(BaseMulTicks([1]), -1e-1, -1e-3)) ≈ [-1e-1, -1e-2, -1e-3]   # negated flip
+    @test_throws Exception tickvalues(BaseMulTicks([1]), -1.0, 1.0)         # straddles 0 ⇒ SymLog method
+    @test length(tickvalues(BaseMulTicks(), 1e-4, 1e-2)) ≥ 7                # auto-densifies to ≥ k_min
+
+    # scale_ticks regimes: the vanishing-ticks fix. Each of these returned 0–1 ticks before.
+    posn(S, ts, lo, hi) = [(float(S(v)) - float(S(lo))) / (float(S(hi)) - float(S(lo))) for v in ts]
+    for (lo, hi, a) in [(-3e-5, 3e-5, 1e-4),     # tiny V, whole range inside the linear core
+                        (1e-4, 5e-4, 1e-2),       # narrow sequential
+                        (2e-3, 6e-3, 1e-4),       # sub-decade span
+                        (-1e-2, 1e-2, 1e-4),      # wide bipolar
+                        (0.0, 5e-2, 1e-4)]        # wide sequential incl. 0
+        S = SymLog(a); ts = scale_ticks(S, lo, hi)
+        @test length(ts) ≥ 2                       # never empty
+        @test issorted(ts)
+        p = posn(S, ts, lo, hi)
+        @test issorted(p)                          # monotone under the scale
+        @test all(t -> -1e-9 ≤ t ≤ 1 + 1e-9, p)    # every tick within the bar
+    end
+
+    # SymLog bipolar: symmetric about 0, endpoint decade retained despite fp rounding
+    bip = scale_ticks(SymLog(1e-4), -1e-2, 1e-2)
+    @test 0.0 in bip
+    @test bip ≈ -reverse(bip)
+    @test any(v -> isapprox(v, 1e-2; rtol=1e-6), bip) && any(v -> isapprox(v, -1e-2; rtol=1e-6), bip)
+    @test !(0.0 in scale_ticks(SymLog(1e-4), 1e-4, 1e-2))                   # 0 excluded when unspanned
+
+    # linear / log scale dispatch
+    @test scale_ticks(identity, 0.0, 6.3) ≈ [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    @test scale_ticks(sqrt, 0.0, 4.0) == scale_ticks(identity, 0.0, 4.0)   # sqrt ⇒ linear ticks
+    lg = scale_ticks(log10, 1e-4, 1e-2)
+    @test count(v -> isapprox(v, 1e-2; rtol=1e-6), lg) == 1                 # endpoint decades kept
+    @test count(v -> isapprox(v, 1e-4; rtol=1e-6), lg) == 1
 end

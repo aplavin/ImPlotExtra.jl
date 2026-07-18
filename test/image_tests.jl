@@ -19,11 +19,11 @@ end
     @test_throws Exception cr([NaN NaN], nothing)                 # no finite values
 end
 
-@testitem "_scalar_rgba!" begin
+@testitem "_scalar_rgba! exact path (lut=false)" begin
     using ColorSchemes: colorschemes
     using ColorTypes: RGBA, N0f8, red, green, blue, alpha
     using Unitful: @u_str
-    f = ImPlotExtra._scalar_rgba!
+    f(buf, data, scheme; kw...) = ImPlotExtra._scalar_rgba!(buf, data, scheme; lut=false, kw...)  # exact per-pixel path
     sc = colorschemes[:viridis]
     lo = convert(RGBA{N0f8}, get(sc,0.0)); hi = convert(RGBA{N0f8}, get(sc,1.0)); mid = convert(RGBA{N0f8}, get(sc,0.5))
     nanc = RGBA{N0f8}(0,0,0,0)
@@ -35,7 +35,7 @@ end
     @test buf[1,1] == lo
     @test buf[2,3] == hi
     @test bytes(buf[1,1]) == (0x44,0x01,0x54,0xff)            # independent hardcoded viridis(0.0)
-    @test (@inferred f(buf, data, sc; colorrange=(1.0,6.0), colorscale=identity, nan_color=nanc)) === buf
+    @test (@inferred ImPlotExtra._scalar_rgba!(buf, data, sc; colorrange=(1.0,6.0), colorscale=identity, nan_color=nanc, lut=false)) === buf
 
     d2 = [1.0 NaN; 1.0 6.0]; b2 = Matrix{RGBA{N0f8}}(undef,2,2)
     f(b2, d2, sc; colorrange=(1.0,6.0), colorscale=identity, nan_color=nanc)
@@ -61,44 +61,57 @@ end
     @test_throws Exception f(b4, d4, sc; colorrange=(10.0,1.0), colorscale=identity, nan_color=nanc) # inverted
 end
 
-@testitem "_scalar_rgba! LUT fast path ≈ per-pixel reference" begin
+@testitem "_scalar_rgba! LUT (default) ≈ exact, all eltypes" begin
     using ColorSchemes: colorschemes, get
     using ColorTypes: RGBA, N0f8, red, green, blue, alpha
+    using Unitful: @u_str
     nanc = RGBA{N0f8}(0,0,0,0)
     byte(x) = Int(reinterpret(UInt8, x))
     chdiff(x, y) = maximum(abs, (byte(red(x))-byte(red(y)), byte(green(x))-byte(green(y)),
                                  byte(blue(x))-byte(blue(y)), byte(alpha(x))-byte(alpha(y))))
-    # independent per-pixel reference: value→colour directly, no table
+    # independent exact reference: units divided out (as the impl does), value→colour per pixel, no table
     function ref(data, sc, lo, hi, cs)
-        slo, shi = cs(lo), cs(hi)
+        u = oneunit(lo); iu = inv(u); loʹ, hiʹ = lo/u, hi/u; slo, shi = cs(loʹ), cs(hiʹ)
         map(data) do v
             isfinite(v) || return nanc
-            t = (cs(clamp(v, lo, hi)) - slo) / (shi - slo)
+            t = (cs(clamp(v*iu, loʹ, hiʹ)) - slo) / (shi - slo)
             isfinite(t) ? convert(RGBA{N0f8}, get(sc, clamp(t, 0.0, 1.0))) : nanc
         end
     end
-
     sc = colorschemes[:viridis]; scb = colorschemes[:balance]
     cases = ((identity,0.0,1.0,sc), (asinh,1e-4,5.0,sc), (log10,1e-3,10.0,sc), (sqrt,0.0,4.0,sc),
              (identity,-1.0,1.0,scb), (asinh,-0.5,0.5,scb))
+    mag = 10 .^ (10 .* rand(200,200) .- 5)
 
-    # Float32: signed, log-spanning data incl. finite out-of-range (±1e8), NaN, Inf
-    d = Float32.(sign.(randn(200,200)) .* 10 .^ (10 .* rand(200,200) .- 5))
-    d[1]=1f8; d[2]=-1f8; d[3]=NaN32; d[4]=Inf32
-    buf = Matrix{RGBA{N0f8}}(undef, size(d))
-    for (cs, lo, hi, scc) in cases
-        ImPlotExtra._scalar_rgba!(buf, d, scc; colorrange=(lo,hi), colorscale=cs, nan_color=nanc)
-        @test maximum(chdiff.(buf, ref(d, scc, lo, hi, cs))) ≤ 2    # 16-bit quantisation ⇒ ≤1 colormap step
-        @test buf[3] == nanc && buf[4] == nanc                       # NaN/Inf → nan_color
+    # Float32 ≡ Float64 (no eltype dependency); incl. out-of-range ±1e8, NaN, Inf
+    for T in (Float32, Float64)
+        d = T.(sign.(randn(200,200)) .* mag); d[1]=T(1e8); d[2]=T(-1e8); d[3]=T(NaN); d[4]=T(Inf)
+        buf = Matrix{RGBA{N0f8}}(undef, size(d))
+        for (cs, lo, hi, scc) in cases
+            ImPlotExtra._scalar_rgba!(buf, d, scc; colorrange=(lo,hi), colorscale=cs, nan_color=nanc)
+            @test maximum(chdiff.(buf, ref(d, scc, lo, hi, cs))) ≤ 3
+            @test buf[3] == nanc && buf[4] == nanc
+        end
     end
-    @test (@inferred ImPlotExtra._scalar_rgba!(buf, d, sc; colorrange=(1e-4,5.0), colorscale=asinh, nan_color=nanc)) === buf
+    bi = Matrix{RGBA{N0f8}}(undef,4,4); di = rand(Float32,4,4)
+    @test (@inferred ImPlotExtra._scalar_rgba!(bi, di, sc; colorrange=(0.0,1.0), colorscale=asinh, nan_color=nanc)) === bi
 
-    # Float16: the 16-bit table enumerates every representable value ⇒ exact
-    d16 = Float16.(10 .^ (3 .* rand(200,200) .- 2)); b16 = Matrix{RGBA{N0f8}}(undef, size(d16))
-    for (cs, lo, hi) in ((asinh,1e-3,5.0), (log10,1e-2,10.0), (identity,0.0,1.0))
-        ImPlotExtra._scalar_rgba!(b16, d16, sc; colorrange=(lo,hi), colorscale=cs, nan_color=nanc)
-        @test maximum(chdiff.(b16, ref(d16, sc, lo, hi, cs))) == 0
+    # Unitful through the SAME path; log10 works (impossible per-pixel on a Quantity); mixed units convert
+    pos = 10 .^ (6 .* rand(200,200) .- 3)
+    du = Float32.(pos) .* u"m"; bu = similar(du, RGBA{N0f8})
+    for (cs, lo, hi) in ((identity,0.5u"m",8.0u"m"), (log10,1e-2u"m",10.0u"m"))
+        ImPlotExtra._scalar_rgba!(bu, du, sc; colorrange=(lo,hi), colorscale=cs, nan_color=nanc)
+        @test maximum(chdiff.(bu, ref(du, sc, lo, hi, cs))) ≤ 3
     end
+    dcm = Float32.(100 .* pos) .* u"cm"; bcm = similar(dcm, RGBA{N0f8})
+    ImPlotExtra._scalar_rgba!(bcm, dcm, sc; colorrange=(0.5u"m",8.0u"m"), colorscale=identity, nan_color=nanc)
+    @test maximum(chdiff.(bcm, ref(dcm, sc, 0.5u"m", 8.0u"m", identity))) ≤ 3
+
+    # lut=false agrees with lut=true to ≤3/255 (toggle trades speed for exactness)
+    d = Float32.(pos); a = similar(d, RGBA{N0f8}); b = similar(d, RGBA{N0f8})
+    ImPlotExtra._scalar_rgba!(a, d, sc; colorrange=(1e-3,10.0), colorscale=log10, nan_color=nanc, lut=true)
+    ImPlotExtra._scalar_rgba!(b, d, sc; colorrange=(1e-3,10.0), colorscale=log10, nan_color=nanc, lut=false)
+    @test maximum(chdiff.(a, b)) ≤ 3
 end
 
 @testitem "_colorant_rgba!" begin

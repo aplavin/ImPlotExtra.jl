@@ -161,6 +161,14 @@ end
     @test s(-2e-4) ≈ -asinh(2.0)                 # odd
     @test SymLog(1e-4) === SymLog(1e-4)          # isbits egal ⇒ no per-frame re-upload
 
+    # inverse auto-derived by InverseFunctions from the same asinh∘(/threshold) composition (no manual sinh)
+    inv = ImPlotExtra.inverse(s)
+    @test inv(s(3e-4)) ≈ 3e-4                     # round-trip both signs
+    @test inv(s(-7e-4)) ≈ -7e-4
+    @test inv(0.0) == 0.0
+    @test ImPlotExtra.inverse(log10)(log10(50.0)) ≈ 50.0   # built-in scales are invertible too
+    @test ImPlotExtra.inverse(identity)(3.0) == 3.0
+
     # BaseMulTicks: mul·base^pow over a same-sign range
     @test tickvalues(BaseMulTicks([1]), 1e-3, 1e-1) ≈ [1e-3, 1e-2, 1e-1]
     @test isempty(tickvalues(BaseMulTicks([1]), 5.0, 1.0))                  # vmin ≥ vmax ⇒ empty
@@ -196,4 +204,43 @@ end
     lg = scale_ticks(log10, 1e-4, 1e-2)
     @test count(v -> isapprox(v, 1e-2; rtol=1e-6), lg) == 1                 # endpoint decades kept
     @test count(v -> isapprox(v, 1e-4; rtol=1e-6), lg) == 1
+end
+
+@testitem "colorbar! interaction math" begin
+    using ImPlotExtra: SymLog, _cbar_zoom_cursor, _cbar_pan, _cbar_zoom_sym
+    posn(S, v, lo, hi) = (float(S(v)) - float(S(lo))) / (float(S(hi)) - float(S(lo)))   # colour-fraction of v
+
+    # zoom-about-cursor (identity): the value under the cursor stays fixed; window scales by z
+    for f in (0.0, 0.3, 1.0), z in (0.5, 2.0)
+        lo, hi = 0.0, 10.0
+        nlo, nhi = _cbar_zoom_cursor(identity, lo, hi, f, z)
+        @test (lo + f*(hi-lo)) ≈ (nlo + f*(nhi-nlo))       # pivot data value unchanged
+        @test (nhi - nlo) ≈ (hi - lo) * z                  # width scaled by z
+    end
+
+    # zoom-about-cursor (log10): uniform on the log bar; endpoints stay positive; pivot fraction preserved
+    nlo, nhi = _cbar_zoom_cursor(log10, 1e-2, 1e2, 0.5, 0.5)
+    @test nlo > 0 && nhi > 0
+    @test posn(log10, 1.0, nlo, nhi) ≈ 0.5                 # log-mid pivot (value 1.0) stays at fraction 0.5
+    @test log10(nhi) - log10(nlo) ≈ (log10(1e2) - log10(1e-2)) * 0.5
+
+    # zoom-about-cursor (SymLog): pivot value fixed, monotone, uniform in transformed space
+    S = SymLog(0.1); zlo, zhi = _cbar_zoom_cursor(S, -5.0, 5.0, 0.3, 0.4)
+    @test zlo < zhi
+    @test (float(S(zhi)) - float(S(zlo))) ≈ (float(S(5.0)) - float(S(-5.0))) * 0.4
+    pivot = ImPlotExtra.inverse(S)(float(S(-5.0)) + 0.3*(float(S(5.0)) - float(S(-5.0))))  # data value under cursor
+    @test posn(S, pivot, zlo, zhi) ≈ 0.3                   # its transformed fraction is preserved
+
+    # pan (identity): grab-follow shift adds ds to both endpoints
+    @test _cbar_pan(identity, 0.0, 10.0, 2.0) == (2.0, 12.0)
+    # pan (log10) shifts multiplicatively, staying positive
+    plo, phi = _cbar_pan(log10, 1.0, 100.0, 1.0)           # +1 in log space ⇒ ×10
+    @test plo ≈ 10.0 && phi ≈ 1000.0
+
+    # symmetric zoom about 0 (SymLog): remains symmetric; half-width shrinks for z<1
+    sl, sh = _cbar_zoom_sym(SymLog(0.1), 0.0, 5.0, 0.5)
+    @test sl ≈ -sh && 0 < sh < 5.0
+    # symmetric zoom about nonzero center (identity): range = center ± h, h scaled by z
+    @test _cbar_zoom_sym(identity, 5.0, 8.0, 0.5) == (3.5, 6.5)   # h: 3 → 1.5
+    @test _cbar_zoom_sym(identity, 0.0, 2.0, 2.0) == (-4.0, 4.0)  # zoom out: h 2 → 4
 end

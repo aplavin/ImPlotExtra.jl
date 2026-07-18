@@ -9,6 +9,8 @@
 # This is exactly how `image!` maps a value to a colour, so bar and image can never disagree.
 
 using Printf: @sprintf
+using Accessors: @o
+import InverseFunctions: inverse
 
 # ---- colour scales & their tick generators ----------------------------------
 # A "scale" is any callable value→position transform, usable directly as `image!`'s `colorscale`.
@@ -23,11 +25,16 @@ finite and monotone through 0 (unlike `log10`). Usable both as `image!`'s `color
 `colorbar!` scale. Value-stable under `===` (isbits with one field), so rebuilding one per frame never
 forces a texture re-upload. Same asinh family as ImPlot's built-in `ImPlotScale_SymLog` (`2·asinh(v/2)`)
 and MakieExtra's `AsinhScale`, differing only in the (here tunable) threshold.
+
+`InverseFunctions.inverse(::SymLog)` is auto-derived (`threshold·sinh`) from the same `asinh ∘ (/threshold)`
+composition that defines the forward map, so `colorbar!`'s (invertible) interactive zoom/pan works with it.
 """
+_symlog_f(threshold) = @o asinh(_ / threshold)   # asinh ∘ Fix2(/, threshold): isbits, value-stable, invertible
 struct SymLog
     threshold::Float64
 end
-(s::SymLog)(v) = asinh(v / s.threshold)
+(s::SymLog)(v) = _symlog_f(s.threshold)(v)
+inverse(s::SymLog) = inverse(_symlog_f(s.threshold))   # auto-derived by InverseFunctions: Fix2(*, threshold) ∘ sinh
 
 # ---- BaseMulTicks: base^exponent × {subs} tick locator ----------------------
 # Ported from MakieExtra's `BaseMulTicks` (Makie-free here). `tickvalues(t, lo, hi)` places
@@ -130,8 +137,63 @@ end
 
 _default_label(v) = @sprintf("%g", v)
 
+# ---- interaction (scroll = zoom, left-drag = pan) ---------------------------
+# All operate on the window `[S(lo), S(hi)]` in COLORSCALE space, so a scroll notch zooms the same
+# visible fraction everywhere on the (nonlinearly-spaced) bar; `inverse(scale)` maps endpoints back
+# to data units. `log10` stays > 0 for free (its inverse `exp10` is always positive).
+
+# zoom about the value under the cursor: `f` ∈ [0,1] from the lo-end to the hi-end, factor `z` (<1 zooms in)
+function _cbar_zoom_cursor(scale, lo, hi, f, z)
+    Si = inverse(scale)
+    slo, shi = float(scale(lo)), float(scale(hi))
+    sp = slo + f * (shi - slo)                       # transformed value under the cursor (held fixed)
+    w = (shi - slo) * z
+    (Si(sp - f * w), Si(sp + (1 - f) * w))
+end
+
+# shift the window by `ds` in transformed units (grab-follow: the grabbed value tracks the cursor)
+function _cbar_pan(scale, lo, hi, ds)
+    Si = inverse(scale)
+    (Si(float(scale(lo)) + ds), Si(float(scale(hi)) + ds))
+end
+
+# symmetric zoom about a fixed `center`: scale the upper transformed half-width by `z`, mirror to lo
+function _cbar_zoom_sym(scale, center, hi, z)
+    Si = inverse(scale)
+    sc, shi = float(scale(center)), float(scale(hi))
+    h = Si(sc + (shi - sc) * z) - center
+    (center - h, center + h)
+end
+
+# read this frame's scroll/drag over the reserved item and mutate the `colorrange` Ref in place. The
+# mutation is picked up next frame by both this bar and the `image!` sharing the Ref (one-frame lag,
+# imperceptible). `SetItemKeyOwner(MouseWheelY)` (called at the item) keeps the window from scrolling.
+function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, zoom_speed)
+    gh = gy1 - gy0
+    nlo, nhi = lo, hi
+    if ig.IsItemHovered()
+        wheel = Float64(unsafe_load(ig.GetIO()).MouseWheel)
+        if wheel != 0
+            z = exp(-zoom_speed * wheel)                 # wheel up (>0) ⇒ z<1 ⇒ zoom in
+            nlo, nhi = symmetric === nothing ?
+                _cbar_zoom_cursor(scale, lo, hi, clamp((gy1 - ig.GetMousePos().y) / gh, 0.0, 1.0), z) :
+                _cbar_zoom_sym(scale, float(symmetric), hi, z)
+        end
+    end
+    if symmetric === nothing && ig.IsItemActive()            # left-drag pan (disabled in symmetric mode)
+        d = ig.GetMouseDragDelta(0); ig.ResetMouseDragDelta(0)
+        if d.y != 0
+            ds = (Float64(d.y) / gh) * (float(scale(nhi)) - float(scale(nlo)))
+            nlo, nhi = _cbar_pan(scale, nlo, nhi, ds)
+        end
+    end
+    (isfinite(nlo) && isfinite(nhi) && nhi > nlo && (nlo, nhi) != (lo, hi)) && (ref[] = (nlo, nhi))
+    nothing
+end
+
 """
-    colorbar!(colormap, colorrange, colorscale, height; bar_w=20, formatter=v->@sprintf("%g", v))
+    colorbar!(label, colormap, colorrange, colorscale, height; bar_w=20, formatter=v->@sprintf("%g", v),
+              symmetric=nothing, zoom_speed=0.15)
 
 Draw a vertical colorbar into the current window at the cursor — call it right after `EndPlot` and
 `CImGui.SameLine()` — matching an `image!` drawn with the same `colormap`, `colorrange` and
@@ -139,18 +201,36 @@ Draw a vertical colorbar into the current window at the cursor — call it right
 correct under a nonlinear `colorscale` (`log10`, `sqrt`, [`SymLog`](@ref), …), which ImPlot's own
 `ColormapScale` cannot do.
 
+- `label`: an ImGui id (as in [`image!`](@ref)); unique per bar, may be hidden (`"##bar"`). Used for
+  the interactive hit region.
 - `colormap`: as in [`image!`](@ref) — a Symbol/name, a `ColorScheme`, or a `Vector{<:Colorant}`.
-- `colorrange`: `(lo, hi)` in data units.
+- `colorrange`: `(lo, hi)` in data units, as a plain tuple (**static**) or a `Ref`/`Base.RefValue`
+  holding `(lo, hi)` (**interactive**, see below).
 - `colorscale`: the value→position callable passed to `image!` (default-safe with `identity`).
 - `height`: bar height in pixels — match the plot's height.
 - `bar_w`: gradient width in pixels.
 - `formatter`: `value -> String` for tick labels.
 
+# Interaction (Ref `colorrange` only)
+When `colorrange` is a `Ref`, scrolling over the bar zooms and left-dragging pans, mutating the `Ref`
+in place — pass the SAME `Ref[]` to `image!`'s `colorrange` so the image tracks the bar. Zoom/pan act
+uniformly on the visible bar (in `colorscale` space), so `colorscale` must be invertible via
+`InverseFunctions.inverse` — `identity`, `log10`, `sqrt` and [`SymLog`](@ref) all are.
+
+- `symmetric = nothing`: free range — scroll zooms about the value under the cursor, left-drag pans.
+- `symmetric = c` (a number): constrain the range symmetric about the fixed center `c`
+  (`lo = c-h, hi = c+h`); scroll zooms about `c` (adjusting `h`) and panning is disabled.
+- `zoom_speed`: zoom fraction per wheel notch (`z = exp(-zoom_speed·wheel)`).
+
+A plain-tuple `colorrange` ignores `symmetric`/`zoom_speed` and just draws (fully static).
+
 Tick values come from `scale_ticks(colorscale, lo, hi)`; define a `scale_ticks` method to support a
 custom scale. A degenerate range (`colorscale(lo) == colorscale(hi)`) draws a flat bar with no ticks.
 """
-function colorbar!(colormap, colorrange, colorscale, height::Real; bar_w::Real=20, formatter=_default_label)
-    lo, hi = float(colorrange[1]), float(colorrange[2])
+function colorbar!(label, colormap, colorrange, colorscale, height::Real; bar_w::Real=20,
+                   formatter=_default_label, symmetric=nothing, zoom_speed::Real=0.15)
+    interactive = colorrange isa Ref
+    lo, hi = interactive ? (float(colorrange[][1]), float(colorrange[][2])) : (float(colorrange[1]), float(colorrange[2]))
     cs = resolve_scheme(colormap)
     slo, shi = float(colorscale(lo)), float(colorscale(hi))
     degen = !(isfinite(slo) && isfinite(shi)) || slo == shi
@@ -168,6 +248,10 @@ function colorbar!(colormap, colorrange, colorscale, height::Real; bar_w::Real=2
 
     dl = ig.GetWindowDrawList()
     p = ig.GetCursorScreenPos()
+    if interactive                                       # reserve the rect + an id, own the wheel (no window scroll)
+        ig.InvisibleButton(label, ig.ImVec2(frame_w, h))
+        ig.SetItemKeyOwner(ig.lib.ImGuiKey_MouseWheelY)
+    end
     fx0, fy0 = p.x, p.y
     fx1, fy1 = fx0 + frame_w, fy0 + h
     ig.AddRectFilled(dl, ig.ImVec2(fx0, fy0), ig.ImVec2(fx1, fy1), ig.GetColorU32(ig.ImGuiCol_FrameBg))
@@ -190,6 +274,7 @@ function colorbar!(colormap, colorrange, colorscale, height::Real; bar_w::Real=2
         ig.AddLine(dl, ig.ImVec2(gx1 - 1, y), ig.ImVec2(gx1 - mtl.y, y), tickcol, mts.y)
         ig.AddText(dl, ig.ImVec2(gx1 + lp.x, y - fs / 2), txt, lab)
     end
-    ig.Dummy(ig.ImVec2(frame_w, h))
+    interactive ? _cbar_interact!(colorrange, colorscale, lo, hi, gy0, gy1, symmetric, float(zoom_speed)) :
+                  ig.Dummy(ig.ImVec2(frame_w, h))
     nothing
 end

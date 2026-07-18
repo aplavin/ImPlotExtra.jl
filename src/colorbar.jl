@@ -168,16 +168,21 @@ end
 # read this frame's scroll/drag over the reserved item and mutate the `colorrange` Ref in place. The
 # mutation is picked up next frame by both this bar and the `image!` sharing the Ref (one-frame lag,
 # imperceptible). `SetItemKeyOwner(MouseWheelY)` (called at the item) keeps the window from scrolling.
-function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, zoom_speed)
+function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, anchor, zoom_speed)
     gh = gy1 - gy0
     nlo, nhi = lo, hi
     if ig.IsItemHovered()
         wheel = Float64(unsafe_load(ig.GetIO()).MouseWheel)
         if wheel != 0
             z = exp(-zoom_speed * wheel)                 # wheel up (>0) ⇒ z<1 ⇒ zoom in
-            nlo, nhi = symmetric === nothing ?
-                _cbar_zoom_cursor(scale, lo, hi, clamp((gy1 - ig.GetMousePos().y) / gh, 0.0, 1.0), z) :
+            # pivot fraction: symmetric center wins; else fixed anchor value; else the value under the cursor
+            nlo, nhi = if symmetric !== nothing
                 _cbar_zoom_sym(scale, float(symmetric), hi, z)
+            else
+                f = anchor === nothing ? clamp((gy1 - ig.GetMousePos().y) / gh, 0.0, 1.0) :
+                    (float(scale(anchor)) - float(scale(lo))) / (float(scale(hi)) - float(scale(lo)))
+                _cbar_zoom_cursor(scale, lo, hi, f, z)
+            end
         end
     end
     if symmetric === nothing && ig.IsItemActive()            # left-drag pan (disabled in symmetric mode)
@@ -187,13 +192,13 @@ function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, zoom_speed)
             nlo, nhi = _cbar_pan(scale, nlo, nhi, ds)
         end
     end
-    (isfinite(nlo) && isfinite(nhi) && nhi > nlo && (nlo, nhi) != (lo, hi)) && (ref[] = (nlo, nhi))
+    ref[] = (nlo, nhi)
     nothing
 end
 
 """
     colorbar!(label, colormap, colorrange, colorscale, height; bar_w=20, formatter=v->@sprintf("%g", v),
-              symmetric=nothing, zoom_speed=0.15)
+              symmetric=nothing, anchor=nothing, zoom_speed=0.15)
 
 Draw a vertical colorbar into the current window at the cursor — call it right after `EndPlot` and
 `CImGui.SameLine()` — matching an `image!` drawn with the same `colormap`, `colorrange` and
@@ -213,22 +218,24 @@ correct under a nonlinear `colorscale` (`log10`, `sqrt`, [`SymLog`](@ref), …),
 
 # Interaction (Ref `colorrange` only)
 When `colorrange` is a `Ref`, scrolling over the bar zooms and left-dragging pans, mutating the `Ref`
-in place — pass the SAME `Ref[]` to `image!`'s `colorrange` so the image tracks the bar. Zoom/pan act
-uniformly on the visible bar (in `colorscale` space), so `colorscale` must be invertible via
-`InverseFunctions.inverse` — `identity`, `log10`, `sqrt` and [`SymLog`](@ref) all are.
+in place — pass the SAME `Ref[]` to `image!`'s `colorrange` so the image tracks the bar. Zoom and pan
+operate on the window `[colorscale(lo), colorscale(hi)]` and map back with `InverseFunctions.inverse`,
+so a notch zooms uniformly on the (nonlinearly-spaced) bar (`identity`, `log10`, [`SymLog`](@ref), …).
 
-- `symmetric = nothing`: free range — scroll zooms about the value under the cursor, left-drag pans.
+`symmetric` and `anchor` set the scroll pivot (both default `nothing`):
+- both `nothing`: zoom about the value under the cursor; left-drag pans.
+- `anchor = a` (a number): zoom about the fixed value `a`; left-drag still pans.
 - `symmetric = c` (a number): constrain the range symmetric about the fixed center `c`
-  (`lo = c-h, hi = c+h`); scroll zooms about `c` (adjusting `h`) and panning is disabled.
-- `zoom_speed`: zoom fraction per wheel notch (`z = exp(-zoom_speed·wheel)`).
+  (`lo = c-h, hi = c+h`); zoom about `c`, panning disabled. Takes precedence over `anchor`.
 
-A plain-tuple `colorrange` ignores `symmetric`/`zoom_speed` and just draws (fully static).
+`zoom_speed` is the zoom fraction per wheel notch (`z = exp(-zoom_speed·wheel)`). A plain-tuple
+`colorrange` ignores `symmetric`/`anchor`/`zoom_speed` and just draws (fully static).
 
 Tick values come from `scale_ticks(colorscale, lo, hi)`; define a `scale_ticks` method to support a
 custom scale. A degenerate range (`colorscale(lo) == colorscale(hi)`) draws a flat bar with no ticks.
 """
 function colorbar!(label, colormap, colorrange, colorscale, height::Real; bar_w::Real=20,
-                   formatter=_default_label, symmetric=nothing, zoom_speed::Real=0.15)
+                   formatter=_default_label, symmetric=nothing, anchor=nothing, zoom_speed::Real=0.15)
     interactive = colorrange isa Ref
     lo, hi = interactive ? (float(colorrange[][1]), float(colorrange[][2])) : (float(colorrange[1]), float(colorrange[2]))
     cs = resolve_scheme(colormap)
@@ -274,7 +281,7 @@ function colorbar!(label, colormap, colorrange, colorscale, height::Real; bar_w:
         ig.AddLine(dl, ig.ImVec2(gx1 - 1, y), ig.ImVec2(gx1 - mtl.y, y), tickcol, mts.y)
         ig.AddText(dl, ig.ImVec2(gx1 + lp.x, y - fs / 2), txt, lab)
     end
-    interactive ? _cbar_interact!(colorrange, colorscale, lo, hi, gy0, gy1, symmetric, float(zoom_speed)) :
+    interactive ? _cbar_interact!(colorrange, colorscale, lo, hi, gy0, gy1, symmetric, anchor, float(zoom_speed)) :
                   ig.Dummy(ig.ImVec2(frame_w, h))
     nothing
 end

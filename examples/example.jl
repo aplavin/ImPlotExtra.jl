@@ -30,16 +30,17 @@ const DIVERG = Float32[sinpi(i/64) * cospi(j/64) * 3 for i in 1:256, j in 1:256]
 const CR_LIN = Ref((-1.0, 1.0))
 const CR_LOG = Ref((1.0, exp(512/40)))
 const CR_SYM = Ref((-3.0, 3.0))
+const CR_ANC = Ref((-3.0, 3.0))
 const SYMSCALE = SymLog(0.3)
 
 # draw an interactive `image!` + linked `colorbar!` sharing `cr`; returns nothing
-function image_with_bar(id, data, cr; colormap, colorscale=identity, symmetric=nothing)
+function image_with_bar(id, data, cr; colormap, colorscale=identity, symmetric=nothing, anchor=nothing)
     if ImPlot.BeginPlot("##$id", "x", "y", ig.ImVec2(-70, 200))
         ImPlotExtra.image!(id, data; colormap, colorrange=cr[], colorscale)
         ImPlot.EndPlot()
     end
     ig.SameLine()
-    ImPlotExtra.colorbar!("$(id)_bar", colormap, cr, colorscale, 200; symmetric)
+    ImPlotExtra.colorbar!("$(id)_bar", colormap, cr, colorscale, 200; symmetric, anchor)
 end
 
 ig.render(ctx; on_exit = () -> ImPlot.DestroyContext(pctx)) do
@@ -87,6 +88,9 @@ ig.render(ctx; on_exit = () -> ImPlot.DestroyContext(pctx)) do
 
         ig.SeparatorText("D — interactive, SymLog + SYMMETRIC about 0 (balance) — scroll zooms; pan disabled")
         image_with_bar("symimg", DIVERG, CR_SYM; colormap=:balance, colorscale=SYMSCALE, symmetric=0.0)
+
+        ig.SeparatorText("E — interactive, SymLog + fixed ANCHOR at 0 (balance) — zoom pins 0; pan still works")
+        image_with_bar("ancimg", DIVERG, CR_ANC; colormap=:balance, colorscale=SYMSCALE, anchor=0.0)
     end
     ig.End()
 end

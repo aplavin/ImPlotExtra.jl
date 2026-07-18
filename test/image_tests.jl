@@ -243,4 +243,15 @@ end
     # symmetric zoom about nonzero center (identity): range = center ± h, h scaled by z
     @test _cbar_zoom_sym(identity, 5.0, 8.0, 0.5) == (3.5, 6.5)   # h: 3 → 1.5
     @test _cbar_zoom_sym(identity, 0.0, 2.0, 2.0) == (-4.0, 4.0)  # zoom out: h 2 → 4
+
+    # fixed-anchor zoom (colorbar! computes f from the anchor's colour-fraction, then reuses zoom-cursor):
+    # the anchor value's fraction is preserved ⇒ it stays put on the bar, incl. an anchor OUTSIDE the range
+    anchor_zoom(S, lo, hi, a, z) = _cbar_zoom_cursor(S, lo, hi, posn(S, a, lo, hi), z)
+    for (S, lo, hi, a) in ((identity, 0.0, 10.0, 3.0), (log10, 1e-2, 1e2, 1.0),
+                           (SymLog(0.3), -5.0, 5.0, 0.0), (identity, 5.0, 10.0, 0.0))  # last: anchor below range
+        al, ah = anchor_zoom(S, lo, hi, a, 0.5)
+        @test al < ah
+        @test posn(S, a, al, ah) ≈ posn(S, a, lo, hi)            # anchor pinned at its fraction
+        @test (float(S(ah)) - float(S(al))) ≈ (float(S(hi)) - float(S(lo))) * 0.5
+    end
 end

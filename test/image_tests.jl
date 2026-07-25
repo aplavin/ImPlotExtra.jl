@@ -206,6 +206,22 @@ end
     @test count(v -> isapprox(v, 1e-4; rtol=1e-6), lg) == 1
 end
 
+@testitem "colorbar! cursor fraction" begin
+    using ImPlotExtra: _cbar_cursor_frac
+    # vertical: lo end at the bottom pixel p0=200, bar 100px tall ⇒ fraction grows upward (−y)
+    @test _cbar_cursor_frac(false, 200.0, 200.0, 100.0) == 0.0     # at the lo (bottom) end
+    @test _cbar_cursor_frac(false, 150.0, 200.0, 100.0) == 0.5     # midway up
+    @test _cbar_cursor_frac(false, 100.0, 200.0, 100.0) == 1.0     # at the hi (top) end
+    @test _cbar_cursor_frac(false, 250.0, 200.0, 100.0) == 0.0     # below the bar ⇒ clamped
+    @test _cbar_cursor_frac(false,  50.0, 200.0, 100.0) == 1.0     # above the bar ⇒ clamped
+    # horizontal: lo end at the left pixel p0=50, bar 100px wide ⇒ fraction grows rightward (+x)
+    @test _cbar_cursor_frac(true,   50.0,  50.0, 100.0) == 0.0     # at the lo (left) end
+    @test _cbar_cursor_frac(true,  100.0,  50.0, 100.0) == 0.5
+    @test _cbar_cursor_frac(true,  150.0,  50.0, 100.0) == 1.0     # at the hi (right) end
+    @test _cbar_cursor_frac(true,    0.0,  50.0, 100.0) == 0.0     # left of the bar ⇒ clamped
+    @test _cbar_cursor_frac(true,  200.0,  50.0, 100.0) == 1.0     # right of the bar ⇒ clamped
+end
+
 @testitem "colorbar! interaction math" begin
     using ImPlotExtra: SymLog, _cbar_zoom_cursor, _cbar_pan, _cbar_zoom_sym
     posn(S, v, lo, hi) = (float(S(v)) - float(S(lo))) / (float(S(hi)) - float(S(lo)))   # colour-fraction of v

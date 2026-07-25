@@ -91,6 +91,15 @@ ig.render(ctx; on_exit = () -> ImPlot.DestroyContext(pctx)) do
 
         ig.SeparatorText("E — interactive, SymLog + fixed ANCHOR at 0 (balance) — zoom pins 0; pan still works")
         image_with_bar("ancimg", DIVERG, CR_ANC; colormap=:balance, colorscale=SYMSCALE, anchor=0.0)
+
+        ig.SeparatorText("F — orientation × label side (static, no image): vertical/horizontal, regular/opposite")
+        ImPlotExtra.colorbar!("F_v_reg", :viridis, (-1.0, 1.0), identity, 160)
+        ig.SameLine()
+        ImPlotExtra.colorbar!("F_v_opp", :viridis, (-1.0, 1.0), identity, 160; opposite=true)
+        ig.SameLine()
+        ImPlotExtra.colorbar!("F_h_reg", :viridis, (-1.0, 1.0), identity, 200; orientation=:horizontal)
+        ig.SameLine()
+        ImPlotExtra.colorbar!("F_h_opp", :viridis, (-1.0, 1.0), identity, 200; orientation=:horizontal, opposite=true)
     end
     ig.End()
 end

@@ -127,12 +127,13 @@ scale_ticks(::Any, lo, hi) = _linear_ticks(lo, hi)                # sensible def
 # ---- drawing ----------------------------------------------------------------
 
 # ImPlot's own gradient renderer (unwrapped): draws `colors` evenly into `bounds`, interpolating
-# adjacent keys (continuous). `ImRect` is a {ImVec2,ImVec2} isbits struct passed by value.
-function _render_color_bar(colors, dl, x0, y0, x1, y1; reversed=true)
+# adjacent keys (continuous). `vert` fills along y (lo→hi upward with `reversed`), else along x
+# (lo→hi rightward). `ImRect` is a {ImVec2,ImVec2} isbits struct passed by value.
+function _render_color_bar(colors, dl, x0, y0, x1, y1; vert=true, reversed=true)
     bounds = ig.lib.ImRect(ig.ImVec2(x0, y0), ig.ImVec2(x1, y1))
     ccall((:ImPlot_RenderColorBar, ig.lib.libcimgui), Cvoid,
           (Ptr{UInt32}, Cint, Ptr{Cvoid}, ig.lib.ImRect, Bool, Bool, Bool),
-          colors, length(colors), dl, bounds, true, reversed, true)
+          colors, length(colors), dl, bounds, vert, reversed, true)
 end
 
 _default_label(v) = @sprintf("%g", v)
@@ -165,11 +166,18 @@ function _cbar_zoom_sym(scale, center, hi, z)
     (center - h, center + h)
 end
 
+# cursor's colour-fraction (t=0 at the lo end, t=1 at the hi end) from its along-axis pixel `m`, given
+# the lo-end pixel `p0` and along length `glen`. Horizontal grows lo→hi with +x; vertical grows lo→hi
+# upward (−y), so it measures from `p0` downward.
+_cbar_cursor_frac(horiz, m, p0, glen) = clamp((horiz ? m - p0 : p0 - m) / glen, 0.0, 1.0)
+
 # read this frame's scroll/drag over the reserved item and mutate the `colorrange` Ref in place. The
 # mutation is picked up next frame by both this bar and the `image!` sharing the Ref (one-frame lag,
 # imperceptible). `SetItemKeyOwner(MouseWheelY)` (called at the item) keeps the window from scrolling.
-function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, anchor, zoom_speed)
-    gh = gy1 - gy0
+# `horiz` selects the along axis: the cursor/drag are read on x (horizontal) or y (vertical).
+function _cbar_interact!(ref, scale, lo, hi, gx0, gy0, gx1, gy1, horiz, symmetric, anchor, zoom_speed)
+    glen = horiz ? gx1 - gx0 : gy1 - gy0
+    p0 = horiz ? gx0 : gy1                                    # along-axis pixel of the lo end (t=0)
     nlo, nhi = lo, hi
     if ig.IsItemHovered()
         wheel = Float64(unsafe_load(ig.GetIO()).MouseWheel)
@@ -179,7 +187,8 @@ function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, anchor, zoom_s
             nlo, nhi = if symmetric !== nothing
                 _cbar_zoom_sym(scale, float(symmetric), hi, z)
             else
-                f = anchor === nothing ? clamp((gy1 - ig.GetMousePos().y) / gh, 0.0, 1.0) :
+                mp = ig.GetMousePos()
+                f = anchor === nothing ? _cbar_cursor_frac(horiz, horiz ? mp.x : mp.y, p0, glen) :
                     (float(scale(anchor)) - float(scale(lo))) / (float(scale(hi)) - float(scale(lo)))
                 _cbar_zoom_cursor(scale, lo, hi, f, z)
             end
@@ -187,8 +196,9 @@ function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, anchor, zoom_s
     end
     if symmetric === nothing && ig.IsItemActive()            # left-drag pan (disabled in symmetric mode)
         d = ig.GetMouseDragDelta(0); ig.ResetMouseDragDelta(0)
-        if d.y != 0
-            ds = (Float64(d.y) / gh) * (float(scale(nhi)) - float(scale(nlo)))
+        dd = horiz ? d.x : d.y
+        if dd != 0                                           # grab-follow: +x drags value down; −y (up) drags it up
+            ds = (horiz ? -1 : 1) * (Float64(dd) / glen) * (float(scale(nhi)) - float(scale(nlo)))
             nlo, nhi = _cbar_pan(scale, nlo, nhi, ds)
         end
     end
@@ -197,14 +207,14 @@ function _cbar_interact!(ref, scale, lo, hi, gy0, gy1, symmetric, anchor, zoom_s
 end
 
 """
-    colorbar!(label, colormap, colorrange, colorscale, height; bar_w=20, formatter=v->@sprintf("%g", v),
-              symmetric=nothing, anchor=nothing, zoom_speed=0.15)
+    colorbar!(label, colormap, colorrange, colorscale, extent; orientation=:vertical, opposite=false,
+              bar_w=20, formatter=v->@sprintf("%g", v), symmetric=nothing, anchor=nothing, zoom_speed=0.15)
 
-Draw a vertical colorbar into the current window at the cursor — call it right after `EndPlot` and
-`CImGui.SameLine()` — matching an `image!` drawn with the same `colormap`, `colorrange` and
-`colorscale`. Tick labels are in data units, placed at their colour-fraction positions, so they stay
-correct under a nonlinear `colorscale` (`log10`, `sqrt`, [`SymLog`](@ref), …), which ImPlot's own
-`ColormapScale` cannot do.
+Draw a colorbar into the current window at the cursor — call it right after `EndPlot` and
+`CImGui.SameLine()` (vertical) or below the plot (horizontal) — matching an `image!` drawn with the
+same `colormap`, `colorrange` and `colorscale`. Tick labels are in data units, placed at their
+colour-fraction positions, so they stay correct under a nonlinear `colorscale` (`log10`, `sqrt`,
+[`SymLog`](@ref), …), which ImPlot's own `ColormapScale` cannot do.
 
 - `label`: an ImGui id (as in [`image!`](@ref)); unique per bar, may be hidden (`"##bar"`). Used for
   the interactive hit region.
@@ -212,8 +222,12 @@ correct under a nonlinear `colorscale` (`log10`, `sqrt`, [`SymLog`](@ref), …),
 - `colorrange`: `(lo, hi)` in data units, as a plain tuple (**static**) or a `Ref`/`Base.RefValue`
   holding `(lo, hi)` (**interactive**, see below).
 - `colorscale`: the value→position callable passed to `image!` (default-safe with `identity`).
-- `height`: bar height in pixels — match the plot's height.
-- `bar_w`: gradient width in pixels.
+- `extent`: the bar's length in pixels along its value axis — match the plot's height (`:vertical`)
+  or width (`:horizontal`).
+- `orientation`: `:vertical` (value increases upward) or `:horizontal` (value increases rightward).
+- `opposite`: put ticks/labels on the near side of the bar (left of vertical / above horizontal)
+  instead of the default far side (right / below).
+- `bar_w`: gradient thickness in pixels.
 - `formatter`: `value -> String` for tick labels.
 
 # Interaction (Ref `colorrange` only)
@@ -234,8 +248,11 @@ so a notch zooms uniformly on the (nonlinearly-spaced) bar (`identity`, `log10`,
 Tick values come from `scale_ticks(colorscale, lo, hi)`; define a `scale_ticks` method to support a
 custom scale. A degenerate range (`colorscale(lo) == colorscale(hi)`) draws a flat bar with no ticks.
 """
-function colorbar!(label, colormap, colorrange, colorscale, height::Real; bar_w::Real=20,
-                   formatter=_default_label, symmetric=nothing, anchor=nothing, zoom_speed::Real=0.15)
+function colorbar!(label, colormap, colorrange, colorscale, extent::Real; orientation::Symbol=:vertical,
+                   opposite::Bool=false, bar_w::Real=20, formatter=_default_label, symmetric=nothing,
+                   anchor=nothing, zoom_speed::Real=0.15)
+    orientation in (:vertical, :horizontal) || throw(ArgumentError("orientation must be :vertical or :horizontal, got $(repr(orientation))"))
+    horiz = orientation === :horizontal
     interactive = colorrange isa Ref
     lo, hi = interactive ? (float(colorrange[][1]), float(colorrange[][2])) : (float(colorrange[1]), float(colorrange[2]))
     cs = resolve_scheme(colormap)
@@ -249,39 +266,59 @@ function colorbar!(label, colormap, colorrange, colorscale, height::Real; bar_w:
     sty = ImPlot.GetStyle()
     pp = unsafe_load(sty.PlotPadding); lp = unsafe_load(sty.LabelPadding)
     mtl = unsafe_load(sty.MajorTickLen); mts = unsafe_load(sty.MajorTickSize)
-    bw, h = Float32(bar_w), Float32(height)
+    fs = ig.GetFontSize()
+    bw = Float32(bar_w)
+    # per-orientation style metrics: tick stub grows along the across axis, labels sit past it
+    ticklen, tickthick = horiz ? (mtl.x, mts.x) : (mtl.y, mts.y)
+    pp_ac, lp_ac = horiz ? (pp.y, lp.y) : (pp.x, lp.x)              # padding along the across (thickness) axis
     maxlabw = isempty(labels) ? 0f0 : maximum(l -> ig.CalcTextSize(l).x, labels)
-    frame_w = bw + 2 * pp.x + lp.x + maxlabw + mtl.y      # ColormapScale's frame width
+    lab_ac = horiz ? fs : maxlabw                                  # label footprint across the bar (height / width)
+    pad = lp_ac + lab_ac + ticklen                                 # label strip thickness (ColormapScale's `pad`)
+    frame_ac = bw + 2 * pp_ac + pad
+    frame_w, frame_h = horiz ? (Float32(extent), frame_ac) : (frame_ac, Float32(extent))
 
     dl = ig.GetWindowDrawList()
     p = ig.GetCursorScreenPos()
     if interactive                                       # reserve the rect + an id, own the wheel (no window scroll)
-        ig.InvisibleButton(label, ig.ImVec2(frame_w, h))
+        ig.InvisibleButton(label, ig.ImVec2(frame_w, frame_h))
         ig.SetItemKeyOwner(ig.lib.ImGuiKey_MouseWheelY)
     end
     fx0, fy0 = p.x, p.y
-    fx1, fy1 = fx0 + frame_w, fy0 + h
+    fx1, fy1 = fx0 + frame_w, fy0 + frame_h
     ig.AddRectFilled(dl, ig.ImVec2(fx0, fy0), ig.ImVec2(fx1, fy1), ig.GetColorU32(ig.ImGuiCol_FrameBg))
-    # gradient bar, inset by PlotPadding (native RenderColorBar)
-    gx0, gy0 = fx0 + pp.x, fy0 + pp.y
-    gx1, gy1 = gx0 + bw, fy1 - pp.y
-    _render_color_bar(colors, dl, gx0, gy0, gx1, gy1)
+    # gradient bar, inset by PlotPadding; the label strip shifts it off the near side when `opposite`
+    shift = opposite ? pad : 0f0
+    gx0, gy0, gx1, gy1 = if horiz
+        (fx0 + pp.x, fy0 + pp.y + shift, fx1 - pp.x, fy0 + pp.y + shift + bw)
+    else
+        (fx0 + pp.x + shift, fy0 + pp.y, fx0 + pp.x + shift + bw, fy1 - pp.y)
+    end
+    _render_color_bar(colors, dl, gx0, gy0, gx1, gy1; vert=!horiz, reversed=!horiz)   # horizontal ⇒ lo at left
     ig.AddRect(dl, ig.ImVec2(gx0, gy0), ig.ImVec2(gx1, gy1), ig.GetColorU32(ig.ImGuiCol_Border))
-    # ticks at colour-fraction positions: line contrast-coloured inside the bar, label outside
-    gh = gy1 - gy0
+    # ticks at colour-fraction positions: line contrast-coloured inside the bar, label past the labelled edge
+    gw, gh = gx1 - gx0, gy1 - gy0
+    ex, ey = opposite ? (gx0, gy0) : (gx1, gy1)          # bar edge carrying ticks/labels (vertical / horizontal)
+    sgn = opposite ? -1f0 : 1f0                          # outward-normal sign; ticks grow the other way (inward)
     txt = ig.GetColorU32(ig.ImGuiCol_Text)
-    fs = ig.GetFontSize()
     for (v, lab) in zip(ticks, labels)
         t = (float(colorscale(v)) - slo) / (shi - slo)
         (0 <= t <= 1) || continue
-        y = gy1 - t * gh
         c = get(cs, t)
         lum = 0.299 * red(c) + 0.587 * green(c) + 0.114 * blue(c)      # Rec.601 luma
         tickcol = lum > 0.5 ? 0xff000000 : 0xffffffff
-        ig.AddLine(dl, ig.ImVec2(gx1 - 1, y), ig.ImVec2(gx1 - mtl.y, y), tickcol, mts.y)
-        ig.AddText(dl, ig.ImVec2(gx1 + lp.x, y - fs / 2), txt, lab)
+        if horiz
+            x = gx0 + t * gw
+            tw = ig.CalcTextSize(lab).x                  # centre the label under the tick
+            ig.AddLine(dl, ig.ImVec2(x, ey - sgn), ig.ImVec2(x, ey - sgn * ticklen), tickcol, tickthick)
+            ig.AddText(dl, ig.ImVec2(x - tw / 2, opposite ? ey - lp.y - fs : ey + lp.y), txt, lab)
+        else
+            y = gy1 - t * gh
+            labx = opposite ? ex - lp.x - ig.CalcTextSize(lab).x : ex + lp.x   # right-align past the near edge
+            ig.AddLine(dl, ig.ImVec2(ex - sgn, y), ig.ImVec2(ex - sgn * ticklen, y), tickcol, tickthick)
+            ig.AddText(dl, ig.ImVec2(labx, y - fs / 2), txt, lab)
+        end
     end
-    interactive ? _cbar_interact!(colorrange, colorscale, lo, hi, gy0, gy1, symmetric, anchor, float(zoom_speed)) :
-                  ig.Dummy(ig.ImVec2(frame_w, h))
+    interactive ? _cbar_interact!(colorrange, colorscale, lo, hi, gx0, gy0, gx1, gy1, horiz, symmetric, anchor, float(zoom_speed)) :
+                  ig.Dummy(ig.ImVec2(frame_w, frame_h))
     nothing
 end

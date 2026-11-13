@@ -4,7 +4,8 @@
 #   julia> import Pkg; Pkg.activate("examples"); Pkg.develop(path="."); Pkg.instantiate()
 #
 # Two windows:
-#   • "image! demo"    — ImPlotExtra.image!, a performant PlotHeatmap replacement (matrix → GPU texture → one quad).
+#   • "image! demo"    — ImPlotExtra.image!, a performant PlotHeatmap replacement (matrix → GPU texture → one quad),
+#                        plus ImPlotExtra.contour! iso-lines drawn over it.
 #   • "colorbar! demo" — ImPlotExtra.colorbar!, static and INTERACTIVE (scroll = zoom, left-drag = pan),
 #                        linked to an image! through a shared `Ref` colorrange, incl. symmetric mode & log/SymLog.
 
@@ -25,6 +26,8 @@ const STATIC = Float32[sin(i/30) * cos(j/45) for i in 1:1024, j in 1:1024]   # l
 const RGBIMG = [RGB(i/64, j/64, 0.5) for i in 1:64, j in 1:64]               # precomputed RGB image
 const POS    = Float32[exp((i+j)/40) for i in 1:256, j in 1:256]             # strictly positive ⇒ log10 colorscale
 const DIVERG = Float32[sinpi(i/64) * cospi(j/64) * 3 for i in 1:256, j in 1:256]  # signed ⇒ SymLog + symmetric
+const LEVELS_POS = exp10.(-1:0.25:0.25)       # log-spaced contour levels; kept consts ⇒ traced once
+const LEVELS_NEG = -LEVELS_POS
 
 # INTERACTIVE colorranges — one Ref per bar, kept across frames; the bar mutates it, the image reads it.
 const CR_LIN = Ref((-1.0, 1.0))
@@ -64,6 +67,18 @@ ig.render(ctx; on_exit = () -> ImPlot.DestroyContext(pctx)) do
         ig.SeparatorText("3 — direct RGB image (no colormap), nearest filtering")
         if ImPlot.BeginPlot("##rgb", "x", "y", ig.ImVec2(-1, 200))
             ImPlotExtra.image!("rgb", RGBIMG; interpolate=false)
+            ImPlot.EndPlot()
+        end
+
+        ig.SeparatorText("4 — contour!: two-color log-spaced levels over an image; colormap levels")
+        if ImPlot.BeginPlot("##contour", "x", "y", ig.ImVec2(-1, 200))
+            ImPlotExtra.image!("field", DIVERG; colormap=:grays)
+            ImPlotExtra.contour!("positive", DIVERG; levels=LEVELS_POS, color=RGB(0.9, 0.1, 0.1))
+            ImPlotExtra.contour!("negative", DIVERG; levels=LEVELS_NEG, color=RGB(0.1, 0.3, 0.9))
+            ImPlot.EndPlot()
+        end
+        if ImPlot.BeginPlot("##contour_cmap", "x", "y", ig.ImVec2(-1, 200))
+            ImPlotExtra.contour!("8 levels", 0..10, 0..10, STATIC; levels=8, colormap=:plasma, line_weight=2)
             ImPlot.EndPlot()
         end
     end

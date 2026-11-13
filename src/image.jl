@@ -84,11 +84,6 @@ function _centers_to_bounds(x::AbstractInterval, n::Integer)
     (a - Δ/2, b + Δ/2)
 end
 
-_needs_update(::Nothing, _, _) = true
-# tuple === is element-wise egal: identity for the `data` array, value for the isbits rest
-# (colorrange/nan_color/interpolate/extent intervals) and singleton funcs/Symbols. Verified.
-_needs_update(old::Tuple, new::Tuple, refresh::Bool) = refresh || old !== new
-
 mutable struct _ImageTexture
     tex::Union{Nothing,ig.lib.ImTextureRef}
     w::Int
@@ -123,57 +118,85 @@ end
 
 Base.close(p::_ImageTexture) = (p.tex !== nothing && (ig.destroy_image_texture(p.tex); p.tex = nothing); nothing)
 
-struct _Entry
-    tex::_ImageTexture
+# ---- per-call-site cache, shared by plot items (image!, contour!) ----------
+# One `_ItemCache` per item kind, so an image! and a contour! with the same label never collide.
+# An entry holds a value derived from the call's `inputs`; it is recomputed only when they change and
+# freed (`cache.free`) once idle for `cache_grace_seconds[]` or on render-loop exit.
+
+# tuple === is element-wise egal: identity for the `data` array, value for the isbits rest
+# (colorrange/nan_color/interpolate/extent intervals) and singleton funcs/Symbols. Verified.
+_needs_update(old::Tuple, new::Tuple, refresh::Bool) = refresh || old !== new
+
+const _CtxPtr = Ptr{ig.lib.ImGuiContext}
+
+struct _Entry{V}
+    value::V
     inputs::Tuple
     last_used::Float64
 end
 
-const _CACHE = Dict{Tuple{Ptr{ig.lib.ImGuiContext},ig.lib.ImGuiID},_Entry}()
-const cache_grace_seconds = Ref(30.0)                       # set to Inf to disable eviction
-const _last_sweep_frame = Dict{Ptr{ig.lib.ImGuiContext},Int}()
+struct _ItemCache{V,F}
+    free::F                                                 # releases a value's resources (e.g. GPU texture)
+    entries::Dict{Tuple{_CtxPtr,ig.lib.ImGuiID},_Entry{V}}
+    last_sweep_frame::Dict{_CtxPtr,Int}
+end
+_ItemCache{V}(free) where {V} = _ItemCache(free, Dict{Tuple{_CtxPtr,ig.lib.ImGuiID},_Entry{V}}(), Dict{_CtxPtr,Int}())
 
-function _sweep!(ctx, now)
-    isfinite(cache_grace_seconds[]) || return
-    for k in collect(keys(_CACHE))                          # collect ⇒ safe to delete! during loop
-        e = _CACHE[k]
-        if k[1] == ctx && (now - e.last_used) > cache_grace_seconds[]
-            close(e.tex); delete!(_CACHE, k)
-        end
+const cache_grace_seconds = Ref(30.0)                       # set to Inf to disable eviction
+
+# free + drop this context's entries for which `pred(entry)` holds
+function _evict!(pred, cache::_ItemCache, ctx)
+    filter!(cache.entries) do (k, e)
+        (k[1] == ctx && pred(e)) || return true
+        cache.free(e.value); false
     end
 end
 
-# render-exit handler: free this context's textures (GL still alive) + drop its entries, so a reused
+_sweep!(cache::_ItemCache, ctx, now) =
+    isfinite(cache_grace_seconds[]) && _evict!(e -> now - e.last_used > cache_grace_seconds[], cache, ctx)
+
+# render-exit handler: free this context's values (GL still alive) + drop its entries, so a reused
 # context pointer can't hit a stale entry and draw a dead/reassigned texture id (font atlas)
-function _release_textures!()
+function _release!(cache::_ItemCache)
     ctx = ig.GetCurrentContext()
-    filter!(_CACHE) do (k, e)
-        k[1] != ctx && return true
-        close(e.tex); false
-    end
-    delete!(_last_sweep_frame, ctx)
+    _evict!(Returns(true), cache, ctx)
+    delete!(cache.last_sweep_frame, ctx)
     nothing
 end
 
-# Shared orchestration; `fill!` runs ONLY on update (so resolve_scheme/_colorrange/recolor are skipped when cached).
-function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, flags, refresh) where {F}
+# this call site's value: `compute(previous value or nothing)` runs ONLY when `inputs` changed (or `refresh`)
+function _cached!(compute::F, cache::_ItemCache, label, inputs::Tuple, refresh::Bool) where {F}
     ctx = ig.GetCurrentContext()
     now = ig.GetTime()
     fc = Int(ig.GetFrameCount())
-    if get(_last_sweep_frame, ctx, -1) != fc
-        _last_sweep_frame[ctx] = fc
-        _sweep!(ctx, now)
+    if get(cache.last_sweep_frame, ctx, -1) != fc
+        cache.last_sweep_frame[ctx] = fc
+        _sweep!(cache, ctx, now)
     end
     key = (ctx, ig.GetID(label))
-    old = get(_CACHE, key, nothing)
-    p = old === nothing ? _ImageTexture() : old.tex
-    if _needs_update(old === nothing ? nothing : old.inputs, inputs, refresh)
-        _ensure_texture!(p, n1, n2)
+    old = get(cache.entries, key, nothing)
+    value = if isnothing(old)
+        compute(nothing)
+    elseif _needs_update(old.inputs, inputs, refresh)
+        compute(old.value)
+    else
+        old.value
+    end
+    cache.entries[key] = _Entry(value, inputs, now)         # re-stamp last_used every frame ⇒ kept alive
+    value
+end
+
+const _IMAGE_CACHE = _ItemCache{_ImageTexture}(close)
+
+# Shared orchestration; `fill!` runs ONLY on update (so resolve_scheme/_colorrange/recolor are skipped when cached).
+function _image!(fill!::F, label, x, y, inputs, n1, n2, interpolate, flags, refresh) where {F}
+    p = _cached!(_IMAGE_CACHE, label, inputs, refresh) do old
+        p = _ensure_texture!(@something(old, _ImageTexture()), n1, n2)
         buf = Matrix{RGBA{N0f8}}(undef, n1, n2)
         fill!(buf)
         _upload!(p, buf)
+        p
     end
-    _CACHE[key] = _Entry(p, inputs, now)                    # re-stamp last_used every frame ⇒ kept alive
     xb = _centers_to_bounds(x, n1); yb = _centers_to_bounds(y, n2)   # (xmin,xmax),(ymin,ymax)
     _draw(p, label, (xb[1], yb[1]), (xb[2], yb[2]), interpolate, flags)   # corner points (xmin,ymin),(xmax,ymax)
     nothing

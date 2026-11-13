@@ -143,12 +143,25 @@ end
     nu = ImPlotExtra._needs_update
     a = rand(2,2); b = copy(a)
     base = (a, (0.0,1.0), :viridis, identity, RGBA{N0f8}(0,0,0,0), false, (1..2, 1..2))
-    @test nu(nothing, base, false)                         # no prior entry
     @test !nu(base, base, false)                            # identical ⇒ no update
     @test nu(base, base, true)                              # refresh forces update
     @test nu(base, (b, base[2:end]...), false)              # different array object (===)
     @test nu(base, (a, (0.0,2.0), base[3:end]...), false)   # colorrange changed
     @test !nu(base, (a, base[2:end]...), false)             # same object, same opts
+end
+
+@testitem "_ItemCache sweep" begin
+    using ImPlotExtra: _ItemCache, _Entry, _sweep!, cache_grace_seconds
+    freed = Int[]
+    cache = _ItemCache{Int}(v -> push!(freed, v))
+    ctx, other = Ptr{ImPlotExtra.ig.lib.ImGuiContext}(1), Ptr{ImPlotExtra.ig.lib.ImGuiContext}(2)
+    cache.entries[(ctx, 0x1)] = _Entry(1, (), 0.0)          # idle 100 s
+    cache.entries[(ctx, 0x2)] = _Entry(2, (), 90.0)         # idle 10 s
+    cache.entries[(other, 0x1)] = _Entry(3, (), 0.0)        # idle, but another context
+    @test cache_grace_seconds[] == 30.0
+    _sweep!(cache, ctx, 100.0)
+    @test freed == [1]
+    @test issetequal(keys(cache.entries), [(ctx, UInt32(2)), (other, UInt32(1))])
 end
 
 @testitem "SymLog + BaseMulTicks + scale_ticks" begin

@@ -1,6 +1,6 @@
 name = "ImPlotExtra"
 uuid = "bf2a09a8-fe43-4b24-a47f-d3d0370c11fb"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["Alexander Plavin <alexander@plav.in>"]
 
 [deps]

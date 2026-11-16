@@ -273,7 +273,7 @@ function colorbar!(label, colormap, colorrange, colorscale, extent::Real; orient
     pp_ac, lp_ac = horiz ? (pp.y, lp.y) : (pp.x, lp.x)              # padding along the across (thickness) axis
     maxlabw = isempty(labels) ? 0f0 : maximum(l -> ig.CalcTextSize(l).x, labels)
     lab_ac = horiz ? fs : maxlabw                                  # label footprint across the bar (height / width)
-    pad = lp_ac + lab_ac + ticklen                                 # label strip thickness (ColormapScale's `pad`)
+    pad = lp_ac + lab_ac                                           # label strip thickness (ColormapScale's `pad`; ticks lie inside the bar)
     frame_ac = bw + 2 * pp_ac + pad
     frame_w, frame_h = horiz ? (Float32(extent), frame_ac) : (frame_ac, Float32(extent))
 
